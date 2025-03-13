@@ -1,166 +1,98 @@
 #!/usr/bin/env perl
 # SPDX-License-Identifier: GPL-2.0
 #
-# headers_check.pl execute a number of trivial consistency checks
+# Optimized headers_check.pl
 #
-# Usage: headers_check.pl dir [files...]
-# dir:   dir to look for included files
-# files: list of files to check
-#
-# The script reads the supplied files line by line and:
-#
-# 1) for each include statement it checks if the
-#    included file actually exists.
-#    Only include files located in asm* and linux* are checked.
-#    The rest are assumed to be system include files.
-#
-# 2) It is checked that prototypes does not use "extern"
-#
-# 3) Check for leaked CONFIG_ symbols
-
 use warnings;
 use strict;
 use File::Basename;
 
 my ($dir, @files) = @ARGV;
-
 my $ret = 0;
-my $line;
-my $lineno = 0;
-my $filename;
 
-foreach my $file (@files) {
-	$filename = $file;
-
-	open(my $fh, '<', $filename)
-		or die "$filename: $!\n";
-	$lineno = 0;
-	while ($line = <$fh>) {
-		$lineno++;
-		&check_include();
-		&check_asm_types();
-		&check_sizetypes();
-		&check_declarations();
-		# Dropped for now. Too much noise &check_config();
-	}
-	close $fh;
+foreach my $filename (@files) {
+    open(my $fh, '<', $filename) or die "$filename: $!\n";
+    
+    my ($lineno, $linux_asm_types, $linux_types) = (0, 0, 0);
+    my %import_stack;
+    
+    while (my $line = <$fh>) {
+        $lineno++;
+        check_include($filename, $lineno, $line);
+        check_asm_types($filename, $lineno, $line, \$linux_asm_types);
+        check_sizetypes($filename, $lineno, $line, \$linux_types, \%import_stack);
+        check_declarations($filename, $lineno, $line);
+    }
+    close $fh;
 }
 exit $ret;
 
-sub check_include
-{
-	if ($line =~ m/^\s*#\s*include\s+<((asm|linux).*)>/) {
-		my $inc = $1;
-		my $found;
-		$found = stat($dir . "/" . $inc);
-		if (!$found) {
-			printf STDERR "$filename:$lineno: included file '$inc' is not exported\n";
-			$ret = 1;
-		}
-	}
+sub check_include {
+    my ($filename, $lineno, $line) = @_;
+    if ($line =~ /^\s*#\s*include\s+<((asm|linux).*?)>/) {
+        my $inc = $1;
+        unless (-e "$dir/$inc") {
+            print STDERR "$filename:$lineno: included file '$inc' is not exported\n";
+            $ret = 1;
+        }
+    }
 }
 
-sub check_declarations
-{
-	# soundcard.h is what it is
-	if ($line =~ m/^void seqbuf_dump\(void\);/) {
-		return;
-	}
-	# drm headers are being C++ friendly
-	if ($line =~ m/^extern "C"/) {
-		return;
-	}
-	if ($line =~ m/^(\s*extern|unsigned|char|short|int|long|void)\b/) {
-		printf STDERR "$filename:$lineno: " .
-			      "userspace cannot reference function or " .
-			      "variable defined in the kernel\n";
-	}
+sub check_declarations {
+    my ($filename, $lineno, $line) = @_;
+    return if $line =~ /^void seqbuf_dump\(void\);/ || $line =~ /^extern "C"/;
+    if ($line =~ /^\s*(extern|unsigned|char|short|int|long|void)\b/) {
+        print STDERR "$filename:$lineno: userspace cannot reference function or variable defined in the kernel\n";
+    }
 }
 
-sub check_config
-{
-	if ($line =~ m/[^a-zA-Z0-9_]+CONFIG_([a-zA-Z0-9_]+)[^a-zA-Z0-9_]/) {
-		printf STDERR "$filename:$lineno: leaks CONFIG_$1 to userspace where it is not valid\n";
-	}
+sub check_asm_types {
+    my ($filename, $lineno, $line, $linux_asm_types_ref) = @_;
+    return if $filename =~ /types.h|int-l64.h|int-ll64.h/;
+    return if $$linux_asm_types_ref;
+    if ($line =~ /^\s*#\s*include\s+<asm\/types.h>/) {
+        $$linux_asm_types_ref = 1;
+        print STDERR "$filename:$lineno: include of <linux/types.h> is preferred over <asm/types.h>\n";
+    }
 }
 
-my $linux_asm_types;
-sub check_asm_types
-{
-	if ($filename =~ /types.h|int-l64.h|int-ll64.h/o) {
-		return;
-	}
-	if ($lineno == 1) {
-		$linux_asm_types = 0;
-	} elsif ($linux_asm_types >= 1) {
-		return;
-	}
-	if ($line =~ m/^\s*#\s*include\s+<asm\/types.h>/) {
-		$linux_asm_types = 1;
-		printf STDERR "$filename:$lineno: " .
-		"include of <linux/types.h> is preferred over <asm/types.h>\n"
-		# Warn until headers are all fixed
-		#$ret = 1;
-	}
+sub check_sizetypes {
+    my ($filename, $lineno, $line, $linux_types_ref, $import_stack_ref) = @_;
+    return if $filename =~ /types.h|int-l64.h|int-ll64.h/;
+    return if $$linux_types_ref;
+    if ($line =~ /^\s*#\s*include\s+<linux\/types.h>/) {
+        $$linux_types_ref = 1;
+        return;
+    }
+    if ($line =~ /^\s*#\s*include\s+[<"](\S+)[>"]/) {
+        check_include_typesh($1, $import_stack_ref, $linux_types_ref);
+    }
+    if ($line =~ /__[us](8|16|32|64)\b/) {
+        print STDERR "$filename:$lineno: found __[us]{8,16,32,64} type without #include <linux/types.h>\n";
+        $$linux_types_ref = 2;
+    }
 }
 
-my $linux_types;
-my %import_stack = ();
-sub check_include_typesh
-{
-	my $path = $_[0];
-	my $import_path;
-
-	my $fh;
-	my @file_paths = ($path, $dir . "/" .  $path, dirname($filename) . "/" . $path);
-	for my $possible ( @file_paths ) {
-	    if (not $import_stack{$possible} and open($fh, '<', $possible)) {
-		$import_path = $possible;
-		$import_stack{$import_path} = 1;
-		last;
-	    }
-	}
-	if (eof $fh) {
-	    return;
-	}
-
-	my $line;
-	while ($line = <$fh>) {
-		if ($line =~ m/^\s*#\s*include\s+<linux\/types.h>/) {
-			$linux_types = 1;
-			last;
-		}
-		if (my $included = ($line =~ /^\s*#\s*include\s+[<"](\S+)[>"]/)[0]) {
-			check_include_typesh($included);
-		}
-	}
-	close $fh;
-	delete $import_stack{$import_path};
-}
-
-sub check_sizetypes
-{
-	if ($filename =~ /types.h|int-l64.h|int-ll64.h/o) {
-		return;
-	}
-	if ($lineno == 1) {
-		$linux_types = 0;
-	} elsif ($linux_types >= 1) {
-		return;
-	}
-	if ($line =~ m/^\s*#\s*include\s+<linux\/types.h>/) {
-		$linux_types = 1;
-		return;
-	}
-	if (my $included = ($line =~ /^\s*#\s*include\s+[<"](\S+)[>"]/)[0]) {
-		check_include_typesh($included);
-	}
-	if ($line =~ m/__[us](8|16|32|64)\b/) {
-		printf STDERR "$filename:$lineno: " .
-		              "found __[us]{8,16,32,64} type " .
-		              "without #include <linux/types.h>\n";
-		$linux_types = 2;
-		# Warn until headers are all fixed
-		#$ret = 1;
-	}
+sub check_include_typesh {
+    my ($path, $import_stack_ref, $linux_types_ref) = @_;
+    return if $$linux_types_ref;
+    my @file_paths = ($path, "$dir/$path", dirname($ARGV[0]) . "/$path");
+    
+    foreach my $possible (@file_paths) {
+        next if $import_stack_ref->{$possible};
+        if (open(my $fh, '<', $possible)) {
+            $import_stack_ref->{$possible} = 1;
+            while (my $line = <$fh>) {
+                if ($line =~ /^\s*#\s*include\s+<linux\/types.h>/) {
+                    $$linux_types_ref = 1;
+                    last;
+                }
+                if ($line =~ /^\s*#\s*include\s+[<"](\S+)[>"]/) {
+                    check_include_typesh($1, $import_stack_ref, $linux_types_ref);
+                }
+            }
+            close $fh;
+            delete $import_stack_ref->{$possible};
+        }
+    }
 }

@@ -17,61 +17,31 @@ UAPI_CFLAGS += $(USERCFLAGS)
 
 override c_flags = $(UAPI_CFLAGS) -Wp,-MMD,$(depfile) -I $(obj) -I $(srctree)/usr/dummy-include
 
-# The following are excluded for now because they fail to build.
-#
-# Do not add a new header to the blacklist without legitimate reason.
-# Please consider to fix the header first.
-#
-# Sorted alphabetically.
-no-header-test += asm/ucontext.h
-no-header-test += drm/vmwgfx_drm.h
-no-header-test += linux/am437x-vpfe.h
-no-header-test += linux/coda.h
-no-header-test += linux/cyclades.h
-no-header-test += linux/errqueue.h
-no-header-test += linux/hdlc/ioctl.h
-no-header-test += linux/ivtv.h
-no-header-test += linux/matroxfb.h
-no-header-test += linux/omap3isp.h
-no-header-test += linux/omapfb.h
-no-header-test += linux/patchkey.h
-no-header-test += linux/phonet.h
-no-header-test += linux/sctp.h
-no-header-test += linux/sysctl.h
-no-header-test += linux/usb/audio.h
-no-header-test += linux/v4l2-mediabus.h
-no-header-test += linux/v4l2-subdev.h
-no-header-test += linux/videodev2.h
-no-header-test += linux/vm_sockets.h
-no-header-test += sound/asequencer.h
-no-header-test += sound/asoc.h
-no-header-test += sound/asound.h
-no-header-test += sound/compress_offload.h
-no-header-test += sound/emu10k1.h
-no-header-test += sound/sfnt_info.h
-no-header-test += xen/evtchn.h
-no-header-test += xen/gntdev.h
-no-header-test += xen/privcmd.h
+# List of headers that are currently excluded from testing
+no-header-test := \
+	asm/ucontext.h drm/vmwgfx_drm.h \
+	linux/am437x-vpfe.h linux/coda.h linux/cyclades.h linux/errqueue.h \
+	linux/hdlc/ioctl.h linux/ivtv.h linux/matroxfb.h linux/omap3isp.h \
+	linux/omapfb.h linux/patchkey.h linux/phonet.h linux/sctp.h \
+	linux/sysctl.h linux/usb/audio.h linux/v4l2-mediabus.h \
+	linux/v4l2-subdev.h linux/videodev2.h linux/vm_sockets.h \
+	sound/asequencer.h sound/asoc.h sound/asound.h sound/compress_offload.h \
+	sound/emu10k1.h sound/sfnt_info.h xen/evtchn.h xen/gntdev.h xen/privcmd.h
 
 # More headers are broken in some architectures
-
-ifeq ($(SRCARCH),arc)
-no-header-test += linux/bpf_perf_event.h
+ifneq ($(filter $(SRCARCH), arc powerpc),)
+	no-header-test += linux/bpf_perf_event.h
 endif
 
-ifeq ($(SRCARCH),powerpc)
-no-header-test += linux/bpf_perf_event.h
-endif
-
-ifeq ($(SRCARCH),sparc)
-no-header-test += asm/uctx.h
-no-header-test += asm/fbio.h
+ifneq ($(filter $(SRCARCH), sparc),)
+	no-header-test += asm/uctx.h asm/fbio.h
 endif
 
 # asm-generic/*.h is used by asm/*.h, and should not be included directly
 no-header-test += asm-generic/%
 
-always-y := $(patsubst $(obj)/%.h,%.hdrtest, $(shell find $(obj) -name '*.h' 2>/dev/null))
+# Generate test targets for headers
+always-y := $(patsubst $(obj)/%.h,%.hdrtest, $(wildcard $(obj)/*.h))
 
 # Include the header twice to detect missing include guard.
 quiet_cmd_hdrtest = HDRTEST $<
@@ -84,6 +54,5 @@ quiet_cmd_hdrtest = HDRTEST $<
 $(obj)/%.hdrtest: $(obj)/%.h FORCE
 	$(call if_changed_dep,hdrtest)
 
-# Since GNU Make 4.3, $(patsubst $(obj)/%/,%,$(wildcard $(obj)/*/)) works.
-# To support older Make versions, use a somewhat tedious way.
+# Cleanup rule
 clean-files += $(filter-out Makefile headers_check.pl, $(notdir $(wildcard $(obj)/*)))
